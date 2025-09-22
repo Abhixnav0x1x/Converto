@@ -1,0 +1,11 @@
+# Dependencies for Converto (PDF -> TXT)
+# Pinning a stable release of pdfminer.six which provides text-only extraction.
+pdfminer.six==20221105
+
+# OCR stack (optional):
+# - pypdfium2 renders PDF pages to images for OCR
+# - pillow provides image objects
+# - pytesseract is the Python wrapper for the Tesseract engine
+pypdfium2==4.30.0
+pillow==10.4.0
+pytesseract==0.3.13

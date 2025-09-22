@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "converto"
+version = "0.1.0"
+description = "Convert PDF to TXT (text-only) with optional OCR fallback"
+readme = "README.md"
+authors = [
+  { name = "Abhinav" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+  "pdfminer.six>=20221105",
+]
+keywords = ["pdf", "text", "converter", "ocr", "cli"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Topic :: Text Processing",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/Abhixnav0x1x/converto"
+Issues = "https://github.com/Abhixnav0x1x/converto/issues"
+
+[project.optional-dependencies]
+ocr = [
+  "pypdfium2>=4.20.0",
+  "pillow>=9.0.0",
+  "pytesseract>=0.3.10",
+]
+
+[project.scripts]
+converto = "converto:main"
+
+[tool.setuptools]
+py-modules = ["converto"]
+
+[tool.setuptools.packages.find]
+# Not used since we ship a single module file (converto.py)
