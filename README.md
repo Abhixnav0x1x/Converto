@@ -46,15 +46,13 @@ Now run:
 converto path\to\input.pdf
 ```
 
-### Install directly from GitHub (after you push)
-
-Replace `your-username` and repo name if different:
+### Install directly from GitHub 
 
 ```powershell
-pip install "git+https://github.com/your-username/converto.git#egg=converto"
+pip install "git+https://github.com/Abhixnav0x1x/converto.git#egg=converto"
 
 # With OCR extras
-pip install "git+https://github.com/your-username/converto.git#egg=converto[ocr]"
+pip install "git+https://github.com/Abhixnav0x1x/converto.git#egg=converto[ocr]"
 ```
 
 ---
@@ -66,6 +64,8 @@ Basic conversion (outputs `input.txt` next to the PDF):
 ```powershell
 python converto.py path\to\input.pdf
 ```
+
+If the installed `converto` command is not found, either install the package first (`pip install .`), or run it directly with Python as shown above.
 
 Custom output name or path:
 
@@ -86,7 +86,13 @@ Overwrite an existing file:
 python converto.py input.pdf -o output.txt --overwrite
 ```
 
-Password-protected PDF:
+Faster conversion using multiple workers (splits pages across CPUs):
+
+```powershell
+converto path\to\input.pdf --workers 4
+```
+
+Password-protected PDF:~
 
 ```powershell
 python converto.py secret.pdf --password "YourPassword"
@@ -114,6 +120,8 @@ options:
   --ocr-lang STR           Tesseract language(s), e.g., 'eng', 'eng+hin'.
   --tesseract-path PATH    Full path to tesseract executable if not in PATH
                            (e.g., C:\\Program Files\\Tesseract-OCR\\tesseract.exe).
+  -w, --workers INT        Number of parallel workers to use. Pages are split
+                           across workers and results concatenated in order.
 ```
 
 Output rules:
@@ -152,6 +160,39 @@ OCR options:
 
 ---
 
+## Parallel processing (multiple workers)
+
+Use the `--workers` option to split pages across multiple processes and speed up conversions on multi-core CPUs. Results are concatenated back in the correct page order.
+
+Examples (installed CLI):
+
+```powershell
+# 4 workers for a normal text-based PDF
+converto path\to\input.pdf --workers 4
+
+# OCR fallback when no embedded text is found
+converto path\to\input.pdf --ocr auto --workers 4
+
+# Force OCR for all pages with English language
+converto path\to\input.pdf --ocr always --ocr-lang eng --workers 4
+```
+
+Examples (run via Python, without installing):
+
+```powershell
+python converto.py path\to\input.pdf --workers 4
+python converto.py path\to\input.pdf --ocr auto --workers 4
+python converto.py path\to\input.pdf --ocr always --ocr-lang eng --workers 4
+```
+
+Tips:
+
+- Start with 2–6 workers for best results; very high values can increase memory/CPU usage without further speedup.
+- On Windows, Ctrl+C stops all workers cleanly and exits with code 130.
+- When using OCR, ensure Tesseract is installed and reachable (PATH or `--tesseract-path`).
+
+---
+
 ## Tesseract on Windows
 
 1. Download the installer (UB Mannheim builds recommended for extra languages):
@@ -170,6 +211,10 @@ OCR options:
 - "Output file already exists": Use `--overwrite` to replace it or choose a different name.
 - "Failed to extract text": The file might be encrypted or malformed. Try opening it with a viewer to confirm.
 - "OCR dependencies missing": Install Python deps (`pip install -r requirements.txt`) and Tesseract as above.
+
+### Canceling a run
+
+- Press `Ctrl+C` to stop a conversion. In parallel mode (`--workers > 1`), all worker processes are shut down and the program exits with code 130.
 
 ---
 

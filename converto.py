@@ -28,6 +28,8 @@ import sys
 import os
 from pathlib import Path
 from typing import Optional
+from typing import List, Tuple
+import concurrent.futures as cf
 
 # We use pdfminer.six to extract text only (images are not extracted)
 try:
@@ -85,6 +87,12 @@ def parse_args(argv=None):
         default=None,
         help="Full path to tesseract executable if not in PATH (e.g., C:\\Program Files\\Tesseract-OCR\\tesseract.exe)."
     )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers to use. Pages are split across workers and results concatenated in order."
+    )
     return parser.parse_args(argv)
 
 
@@ -132,6 +140,76 @@ def extract_text_pdfminer(input_pdf: Path, password: Optional[str]) -> str:
     except Exception as e:
         msg = f"Failed to extract text via pdfminer from: {input_pdf}\nReason: {e}"
         raise RuntimeError(msg) from e
+
+
+def _count_pages_pdfminer(input_pdf: Path, password: Optional[str]) -> int:
+    """Return total number of pages using pdfminer."""
+    try:
+        from pdfminer.pdfparser import PDFParser  # type: ignore
+        from pdfminer.pdfdocument import PDFDocument  # type: ignore
+        from pdfminer.pdfpage import PDFPage  # type: ignore
+        with open(input_pdf, "rb") as f:
+            parser = PDFParser(f)
+            doc = PDFDocument(parser, password)
+            pages = list(PDFPage.create_pages(doc))
+            return len(pages)
+    except Exception as e:
+        raise RuntimeError(f"Failed to count pages with pdfminer: {e}") from e
+
+
+def _extract_text_pdfminer_pages(args: Tuple[str, Optional[str], List[int]]) -> Tuple[int, str]:
+    """
+    Worker: extract text for given page indices using pdfminer.
+    Returns (start_page_index, text)
+    """
+    pdf_path, password, page_indices = args
+    try:
+        txt = extract_text(pdf_path, password=password, page_numbers=page_indices) or ""
+        start_idx = page_indices[0] if page_indices else 0
+        return (start_idx, txt)
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract text (pdfminer) for pages {page_indices[:3]}...: {e}") from e
+
+
+def _split_indices(total: int, parts: int) -> List[List[int]]:
+    """Split range(0, total) into `parts` nearly equal lists of page indices."""
+    parts = max(1, min(parts, total if total > 0 else 1))
+    base, extra = divmod(total, parts)
+    chunks: List[List[int]] = []
+    start = 0
+    for i in range(parts):
+        count = base + (1 if i < extra else 0)
+        end = start + count
+        if count > 0:
+            chunks.append(list(range(start, end)))
+        start = end
+    return chunks
+
+
+def extract_text_pdfminer_parallel(input_pdf: Path, password: Optional[str], workers: int) -> str:
+    """Parallel pdfminer text extraction by page, concatenated in order."""
+    total_pages = _count_pages_pdfminer(input_pdf, password)
+    if total_pages <= 0:
+        return ""
+    if workers <= 1 or total_pages == 1:
+        return extract_text_pdfminer(input_pdf, password)
+
+    chunks = _split_indices(total_pages, workers)
+    tasks: List[Tuple[str, Optional[str], List[int]]] = [
+        (str(input_pdf), password, page_indices) for page_indices in chunks
+    ]
+    results: List[Tuple[int, str]] = []
+    with cf.ProcessPoolExecutor(max_workers=len(chunks)) as ex:
+        futures = [ex.submit(_extract_text_pdfminer_pages, task) for task in tasks]
+        try:
+            for fut in cf.as_completed(futures):
+                results.append(fut.result())
+        except KeyboardInterrupt:
+            ex.shutdown(cancel_futures=True)
+            raise
+    # Sort by starting page index and join
+    results.sort(key=lambda t: t[0])
+    return "".join(text for _, text in results)
 
 
 def ocr_pdf_with_tesseract(input_pdf: Path, lang: str, tesseract_path: Optional[str]) -> str:
@@ -184,6 +262,79 @@ def ocr_pdf_with_tesseract(input_pdf: Path, lang: str, tesseract_path: Optional[
     return "\n\n".join(text_chunks) + "\n"
 
 
+def _ocr_pages_worker(args: Tuple[str, List[int], str, Optional[str]]) -> Tuple[int, str]:
+    """Worker to OCR a set of pages with pytesseract via pypdfium2.
+    Returns (start_page_index, text)
+    """
+    pdf_path, page_indices, lang, tesseract_path = args
+    try:
+        import pypdfium2 as pdfium  # type: ignore
+        from PIL import Image  # type: ignore
+        import pytesseract  # type: ignore
+        if tesseract_path:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        pdf = pdfium.PdfDocument(pdf_path)
+        dpi = 200
+        scale = dpi / 72
+        chunks: List[str] = []
+        for i in page_indices:
+            page = pdf[i]
+            bitmap = page.render(scale=scale).to_pil()
+            img = bitmap.convert("L")
+            page_text = pytesseract.image_to_string(img, lang=lang)
+            chunks.append(page_text.rstrip())
+        try:
+            pdf.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        start_idx = page_indices[0] if page_indices else 0
+        return (start_idx, "\n\n".join(chunks))
+    except Exception as e:
+        raise RuntimeError(f"OCR worker failed for pages {page_indices[:3]}...: {e}") from e
+
+
+def ocr_pdf_with_tesseract_parallel(input_pdf: Path, lang: str, tesseract_path: Optional[str], workers: int) -> str:
+    """Parallel OCR using pypdfium2+pytesseract, concatenated in page order."""
+    try:
+        import pypdfium2 as pdfium  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "OCR dependencies missing. Install with: pip install -r requirements.txt"
+        ) from e
+
+    # Count pages using pdfium for reliability in OCR mode
+    try:
+        pdf = pdfium.PdfDocument(str(input_pdf))
+        total_pages = len(pdf)
+        try:
+            pdf.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    except Exception as e:
+        raise RuntimeError(f"Failed to open PDF for OCR: {input_pdf}\nReason: {e}") from e
+
+    if total_pages <= 0:
+        return ""
+    if workers <= 1 or total_pages == 1:
+        return ocr_pdf_with_tesseract(input_pdf, lang, tesseract_path)
+
+    chunks = _split_indices(total_pages, workers)
+    tasks: List[Tuple[str, List[int], str, Optional[str]]] = [
+        (str(input_pdf), page_indices, lang, tesseract_path) for page_indices in chunks
+    ]
+    results: List[Tuple[int, str]] = []
+    with cf.ProcessPoolExecutor(max_workers=len(chunks)) as ex:
+        futures = [ex.submit(_ocr_pages_worker, task) for task in tasks]
+        try:
+            for fut in cf.as_completed(futures):
+                results.append(fut.result())
+        except KeyboardInterrupt:
+            ex.shutdown(cancel_futures=True)
+            raise
+    results.sort(key=lambda t: t[0])
+    return "\n\n".join(text for _, text in results) + "\n"
+
+
 def convert_pdf_to_txt(
     input_pdf: Path,
     output_txt: Path,
@@ -191,6 +342,7 @@ def convert_pdf_to_txt(
     ocr_mode: str,
     ocr_lang: str,
     tesseract_path: Optional[str],
+    workers: int,
 ) -> None:
     """
     Extract text from the input PDF according to the chosen strategy and write it to output_txt.
@@ -199,12 +351,21 @@ def convert_pdf_to_txt(
     """
     text: str = ""
     if ocr_mode == "always":
-        text = ocr_pdf_with_tesseract(input_pdf, lang=ocr_lang, tesseract_path=tesseract_path)
+        if workers and workers > 1:
+            text = ocr_pdf_with_tesseract_parallel(input_pdf, lang=ocr_lang, tesseract_path=tesseract_path, workers=workers)
+        else:
+            text = ocr_pdf_with_tesseract(input_pdf, lang=ocr_lang, tesseract_path=tesseract_path)
     else:
-        text = extract_text_pdfminer(input_pdf, password=password)
+        if workers and workers > 1:
+            text = extract_text_pdfminer_parallel(input_pdf, password=password, workers=workers)
+        else:
+            text = extract_text_pdfminer(input_pdf, password=password)
         if ocr_mode == "auto" and (not text or text.strip() == ""):
             # Fallback to OCR if no text layer found
-            text = ocr_pdf_with_tesseract(input_pdf, lang=ocr_lang, tesseract_path=tesseract_path)
+            if workers and workers > 1:
+                text = ocr_pdf_with_tesseract_parallel(input_pdf, lang=ocr_lang, tesseract_path=tesseract_path, workers=workers)
+            else:
+                text = ocr_pdf_with_tesseract(input_pdf, lang=ocr_lang, tesseract_path=tesseract_path)
 
     # Normalize line endings to Windows-friendly CRLF when on Windows; otherwise default to \n
     newline = "\r\n" if os.name == "nt" else "\n"
@@ -237,7 +398,11 @@ def main(argv=None) -> int:
             args.ocr,
             args.ocr_lang,
             args.tesseract_path,
+            args.workers,
         )
+    except KeyboardInterrupt:
+        print("Interrupted by user (Ctrl+C).", file=sys.stderr)
+        return 130
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 3
