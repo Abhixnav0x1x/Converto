@@ -220,5 +220,5 @@ Tips:
 
 ## Contributing
 
-Issues and PRs are welcome. If you have feature ideas (batch mode, PDF range selection, etc.), open an issue to discuss.
+Issues and PRs are welcome. If you have feature ideas, open an issue to discuss.
 
